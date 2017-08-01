@@ -337,17 +337,30 @@ enum GCDAsyncSocketConfig
 @interface GCDAsyncReadPacket : NSObject
 {
   @public
+    //当前包的数据（容器，有可能为空）
 	NSMutableData *buffer;
+    //开始偏移（数据在容器中开始写的偏移）
 	NSUInteger startOffset;
+    //已读字节数（已经写了个字节数）
 	NSUInteger bytesDone;
+    //想要读取数据的最大长度（有可能没有）
 	NSUInteger maxLength;
+    //超时时长
 	NSTimeInterval timeout;
+    //当前需要读取的总长度（这一次 read 读取的长度，不一定，如果没有则可用 maxLength）
 	NSUInteger readLength;
+    //包的边界标识数据（可能没有）
 	NSData *term;
+    //判断 buffer 的拥有者是不是这个类，还是用户
+    //跟初始化传不传一个 buffer 进来有关，如果传了，则拥有者为用户 NO, 否则为 YES
 	BOOL bufferOwner;
+    //原始传过来的 data长度
 	NSUInteger originalBufferLength;
+    //数据包的 tag
 	long tag;
 }
+
+//初始化
 - (id)initWithData:(NSMutableData *)d
        startOffset:(NSUInteger)s
          maxLength:(NSUInteger)m
@@ -356,14 +369,19 @@ enum GCDAsyncSocketConfig
         terminator:(NSData *)e
                tag:(long)i;
 
+//确保容器大小给多余的长度
 - (void)ensureCapacityForAdditionalDataOfLength:(NSUInteger)bytesToRead;
 
+//预期中读的大小，决定是否走 preBuffer
 - (NSUInteger)optimalReadLengthWithDefault:(NSUInteger)defaultValue shouldPreBuffer:(BOOL *)shouldPreBufferPtr;
 
+//读取指定长度的数据
 - (NSUInteger)readLengthForNonTermWithHint:(NSUInteger)bytesAvailable;
+//上两个方法的综合
 - (NSUInteger)readLengthForTermWithHint:(NSUInteger)bytesAvailable shouldPreBuffer:(BOOL *)shouldPreBufferPtr;
+//根据一个终结符去读数据，直到读到终结的位置或者最大数据的位置，返回值为该包的确定长度
 - (NSUInteger)readLengthForTermWithPreBuffer:(GCDAsyncSocketPreBuffer *)preBuffer found:(BOOL *)foundPtr;
-
+//查找终结符， 在 prebuffer 之后，返回值为该包的确定长度
 - (NSInteger)searchForTermAfterPreBuffering:(ssize_t)numBytes;
 
 @end
@@ -909,7 +927,7 @@ enum GCDAsyncSocketConfig
 	NSMutableArray *readQueue;
 	NSMutableArray *writeQueue;
 	
-    //当前正在读取的数据包
+    //当前这次读取的数据任务包
 	GCDAsyncReadPacket *currentRead;
 	GCDAsyncWritePacket *currentWrite;
 	
@@ -4647,6 +4665,7 @@ enum GCDAsyncSocketConfig
 	[self readDataWithTimeout:timeout buffer:buffer bufferOffset:offset maxLength:0 tag:tag];
 }
 
+//用偏移量 maxLength 读取数据
 - (void)readDataWithTimeout:(NSTimeInterval)timeout
                      buffer:(NSMutableData *)buffer
                bufferOffset:(NSUInteger)offset
@@ -4672,6 +4691,7 @@ enum GCDAsyncSocketConfig
 		
 		if ((flags & kSocketStarted) && !(flags & kForbidReadsWrites))
 		{
+            //往队列添加任务，任务是包的形式
 			[readQueue addObject:packet];
 			[self maybeDequeueRead];
 		}
@@ -4840,29 +4860,38 @@ enum GCDAsyncSocketConfig
  * 
  * This method also handles auto-disconnect post read/write completion.
 **/
+//让读任务离队   开始执行这条读任务
 - (void)maybeDequeueRead
 {
 	LogTrace();
 	NSAssert(dispatch_get_specific(IsOnSocketQueueOrTargetQueueKey), @"Must be dispatched on socketQueue");
 	
 	// If we're not currently processing a read AND we have an available read stream
+    //如果当前读的包为空，而且 flag 为已连接
 	if ((currentRead == nil) && (flags & kConnected))
 	{
+        //如果读的 queue 大于0 （里面装的使我们封装的 GCDAsyncReadPackage 数据包）
 		if ([readQueue count] > 0)
 		{
 			// Dequeue the next object in the write queue
+            //使得下一个对象从写的 queue 中离开
+            //从 readQueue 中拿到第一个写的数据
 			currentRead = [readQueue objectAtIndex:0];
+            //移除
 			[readQueue removeObjectAtIndex:0];
 			
-			
+			//我们的数据包，如果是 GCDAsyncSpecialPacket 这种类型，这个包里装了 TLS 的一些设置
+            //如果是这种类型的数据，那么我们就进行 TLS
 			if ([currentRead isKindOfClass:[GCDAsyncSpecialPacket class]])
 			{
 				LogVerbose(@"Dequeued GCDAsyncSpecialPacket");
 				
 				// Attempt to start TLS
+                //标记 flag 为正在读取的 TLS
 				flags |= kStartingReadTLS;
 				
 				// This method won't do anything unless both kStartingReadTLS and kStartingWriteTLS are set
+                //只有读写都开启了 TLS，才会做 TLS 认证
 				[self maybeStartTLS];
 			}
 			else
@@ -4870,28 +4899,37 @@ enum GCDAsyncSocketConfig
 				LogVerbose(@"Dequeued GCDAsyncReadPacket");
 				
 				// Setup read timer (if needed)
+                //设置读的任务超时，每次延时的时候还会调用 doReadData
 				[self setupReadTimerWithTimeout:currentRead->timeout];
 				
 				// Immediately read, if possible
+                //读取数据
 				[self doReadData];
 			}
 		}
+        //读的队列没有数据，标记 flag 为，读了没有数据则断开连接状态
 		else if (flags & kDisconnectAfterReads)
 		{
+            //如果标记有写然后断开连接
 			if (flags & kDisconnectAfterWrites)
 			{
+                //如果写的队列为0   而且写为空
 				if (([writeQueue count] == 0) && (currentWrite == nil))
 				{
+                    //断开连接
 					[self closeWithError:nil];
 				}
 			}
 			else
 			{
+                //断开连接
 				[self closeWithError:nil];
 			}
 		}
+        //如果有安全的 socket
 		else if (flags & kSocketSecure)
 		{
+            
 			[self flushSSLBuffers];
 			
 			// Edge case:
@@ -4903,13 +4941,14 @@ enum GCDAsyncSocketConfig
 			// then we may have reached the end of the TCP stream.
 			// 
 			// Be sure callbacks are enabled so we're notified about a disconnection.
-			
+			//如果可读的字节数为0
 			if ([preBuffer availableBytes] == 0)
 			{
 				if ([self usingCFStreamForTLS]) {
 					// Callbacks never disabled
 				}
 				else {
+                    //重新恢复读的 source. 因为每次开始读数据的时候，都会挂起读 desource
 					[self resumeReadSource];
 				}
 			}
@@ -6718,6 +6757,7 @@ enum GCDAsyncSocketConfig
 #pragma mark Security
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+//开启 TLS
 - (void)startTLS:(NSDictionary *)tlsSettings
 {
 	LogTrace();
@@ -6735,17 +6775,21 @@ enum GCDAsyncSocketConfig
         tlsSettings = [NSDictionary dictionary];
     }
 	
+    //新生成一个 TLS 特殊的包
 	GCDAsyncSpecialPacket *packet = [[GCDAsyncSpecialPacket alloc] initWithTLSSettings:tlsSettings];
 	
 	dispatch_async(socketQueue, ^{ @autoreleasepool {
 		
 		if ((flags & kSocketStarted) && !(flags & kQueuedTLS) && !(flags & kForbidReadsWrites))
 		{
+            //添加到读写 Queue 去
 			[readQueue addObject:packet];
 			[writeQueue addObject:packet];
 			
+            //把 TLS 标记加上
 			flags |= kQueuedTLS;
 			
+            //开始读取 TLS 的任务， 读到这个包会做 TLS 认证， 在这之前的包还是不用认证就可以传送完
 			[self maybeDequeueRead];
 			[self maybeDequeueWrite];
 		}
@@ -6753,6 +6797,7 @@ enum GCDAsyncSocketConfig
 	
 }
 
+//可能开启 TLS
 - (void)maybeStartTLS
 {
 	// We can't start TLS until:
@@ -6761,27 +6806,37 @@ enum GCDAsyncSocketConfig
 	// 
 	// We'll know these conditions are met when both kStartingReadTLS and kStartingWriteTLS are set
 	
+    //只有读和写 TLS 都开启
 	if ((flags & kStartingReadTLS) && (flags & kStartingWriteTLS))
 	{
+        //需要安全传输
 		BOOL useSecureTransport = YES;
 		
 		#if TARGET_OS_IPHONE
 		{
+            //拿到当前读的数据
 			GCDAsyncSpecialPacket *tlsPacket = (GCDAsyncSpecialPacket *)currentRead;
+            //得到设置字典
             NSDictionary *tlsSettings = @{};
             if (tlsPacket) {
                 tlsSettings = tlsPacket->tlsSettings;
             }
+            //拿到 key 为 CFStreamTLS的 value
 			NSNumber *value = [tlsSettings objectForKey:GCDAsyncSocketUseCFStreamForTLS];
 			if (value && [value boolValue])
+                //如果是用 CFStream 的， 则安全传输为 NO
 				useSecureTransport = NO;
 		}
 		#endif
 		
+        
+        //如果使用安全通道
 		if (useSecureTransport)
 		{
+            //开启 TLS
 			[self ssl_startTLS];
 		}
+        //CFStream 形式的 TLS
 		else
 		{
 		#if TARGET_OS_IPHONE
@@ -7014,15 +7069,20 @@ enum GCDAsyncSocketConfig
 	return errSSLWouldBlock;
 }
 
+//读函数
 static OSStatus SSLReadFunction(SSLConnectionRef connection, void *data, size_t *dataLength)
 {
+    //拿到 socket
 	GCDAsyncSocket *asyncSocket = (__bridge GCDAsyncSocket *)connection;
 	
+    //断言当前为 socketQueue
 	NSCAssert(dispatch_get_specific(asyncSocket->IsOnSocketQueueOrTargetQueueKey), @"What the deuce?");
 	
+    //读取数据并且返回状态吗
 	return [asyncSocket sslReadWithBuffer:data length:dataLength];
 }
 
+//写函数
 static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, size_t *dataLength)
 {
 	GCDAsyncSocket *asyncSocket = (__bridge GCDAsyncSocket *)connection;
@@ -7032,14 +7092,18 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 	return [asyncSocket sslWriteWithBuffer:data length:dataLength];
 }
 
+
+//开启 TLS
 - (void)ssl_startTLS
 {
 	LogTrace();
 	
 	LogVerbose(@"Starting TLS (via SecureTransport)...");
 	
+    //状态标记
 	OSStatus status;
 	
+    //拿到当前读的数据包
 	GCDAsyncSpecialPacket *tlsPacket = (GCDAsyncSpecialPacket *)currentRead;
 	if (tlsPacket == nil) // Code to quiet the analyzer
 	{
@@ -7048,19 +7112,23 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 		[self closeWithError:[self otherError:@"Logic error"]];
 		return;
 	}
+    //拿到设置
 	NSDictionary *tlsSettings = tlsPacket->tlsSettings;
 	
 	// Create SSLContext, and setup IO callbacks and connection ref
-	
+	//根据 key 来判断，当前包是否是服务端的
 	BOOL isServer = [[tlsSettings objectForKey:(__bridge NSString *)kCFStreamSSLIsServer] boolValue];
 	
+    //创建 SSL 上下文
 	#if TARGET_OS_IPHONE || (__MAC_OS_X_VERSION_MIN_REQUIRED >= 1080)
 	{
+        //如果是服务端的创建服务端上下文，否则是客户端的上下文，用 stream 形式
 		if (isServer)
 			sslContext = SSLCreateContext(kCFAllocatorDefault, kSSLServerSide, kSSLStreamType);
 		else
 			sslContext = SSLCreateContext(kCFAllocatorDefault, kSSLClientSide, kSSLStreamType);
 		
+        //为空则报错返回
 		if (sslContext == NULL)
 		{
 			[self closeWithError:[self otherError:@"Error in SSLCreateContext"]];
@@ -7078,31 +7146,38 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 	}
 	#endif
 	
+    //给 SSL 上下文设置 IO 回调， 分别为 SSL 读写函数
 	status = SSLSetIOFuncs(sslContext, &SSLReadFunction, &SSLWriteFunction);
+    //设置出错
 	if (status != noErr)
 	{
 		[self closeWithError:[self otherError:@"Error in SSLSetIOFuncs"]];
 		return;
 	}
 	
+    //在我手之前调用，建立 SSL 连接，第一次连接1
 	status = SSLSetConnection(sslContext, (__bridge SSLConnectionRef)self);
+    //连接出错
 	if (status != noErr)
 	{
 		[self closeWithError:[self otherError:@"Error in SSLSetConnection"]];
 		return;
 	}
 
-
+    //是否应该手动去信任
 	BOOL shouldManuallyEvaluateTrust = [[tlsSettings objectForKey:GCDAsyncSocketManuallyEvaluateTrust] boolValue];
 	if (shouldManuallyEvaluateTrust)
 	{
+        //是服务端的话，不需要，报错返回
 		if (isServer)
 		{
 			[self closeWithError:[self otherError:@"Manual trust validation is not supported for server sockets"]];
 			return;
 		}
 		
+        //第二次连接，再去连接用kSSLSessionOptionBreakOnServerAuth的方式，去连接一次，这种方式可以直接信任服务端证书
 		status = SSLSetSessionOption(sslContext, kSSLSessionOptionBreakOnServerAuth, true);
+        //错误直接返回
 		if (status != noErr)
 		{
 			[self closeWithError:[self otherError:@"Error in SSLSetSessionOption"]];
@@ -7118,6 +7193,7 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 		// built-in trust evaluation. All versions of iOS behave like OS X 10.8 and thus
 		// SSLSetEnableCertVerify is not available on that platform at all.
 		
+        //为了防止 kSSLSessionOptionBreakOnServerAuth 这种情况下，产生了不受信任的环境
 		status = SSLSetEnableCertVerify(sslContext, NO);
 		if (status != noErr)
 		{
@@ -7147,9 +7223,12 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 	// 12. kCFStreamSSLAllowsExpiredCertificates
 	// 13. kCFStreamSSLValidatesCertificateChain
 	// 14. kCFStreamSSLLevel
+    
+    //配置 SSL 上下文设置
 	
 	id value;
 	
+    //这个参数是用来获取证书名验证，如果设置为 NULL，则不验证
 	// 1. kCFStreamSSLPeerName
 	
 	value = [tlsSettings objectForKey:(__bridge NSString *)kCFStreamSSLPeerName];
@@ -7160,6 +7239,7 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 		const char *peer = [peerName UTF8String];
 		size_t peerLen = strlen(peer);
 		
+        //把证书名设置给 SSL
 		status = SSLSetPeerDomainName(sslContext, peer, peerLen);
 		if (status != noErr)
 		{
@@ -7167,6 +7247,7 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 			return;
 		}
 	}
+    //不是 string 就错误返回
 	else if (value)
 	{
 		NSAssert(NO, @"Invalid value for kCFStreamSSLPeerName. Value must be of type NSString.");
@@ -7448,26 +7529,33 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 	// Any data in the preBuffer needs to be moved into the sslPreBuffer,
 	// as this data is now part of the secure read stream.
 	
+    //初始化 SSL 提前缓冲 也是4kb
 	sslPreBuffer = [[GCDAsyncSocketPreBuffer alloc] initWithCapacity:(1024 * 4)];
-	
+	//获取 preBuffer 可读大小
 	size_t preBufferLength  = [preBuffer availableBytes];
 	
+    //如果有可读内容
 	if (preBufferLength > 0)
 	{
+        //确保 SSL 提前缓冲区的大小
 		[sslPreBuffer ensureCapacityForWrite:preBufferLength];
-		
+		//从readBuffer开始读，读这个长度到 SSL 提前缓冲的 writeBuffer 中去
 		memcpy([sslPreBuffer writeBuffer], [preBuffer readBuffer], preBufferLength);
+        //移动提前的读 buffer
 		[preBuffer didRead:preBufferLength];
+        //移动 sslpreBuffer 的写 buffer
 		[sslPreBuffer didWrite:preBufferLength];
 	}
 	
+    //拿到上次错误的 code,并且让上次错误的 code = 没错
 	sslErrCode = lastSSLHandshakeError = noErr;
 	
 	// Start the SSL Handshake process
-	
+	//开始 SSL 握手过程
 	[self ssl_continueSSLHandshake];
 }
 
+//SSL 的握手
 - (void)ssl_continueSSLHandshake
 {
 	LogTrace();
@@ -7479,39 +7567,51 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 	// errSSLPeerBadCert SSL error.
 	// Otherwise, the return value indicates an error code.
 	
+    //用我们的 SSL 上下文对象去握手
 	OSStatus status = SSLHandshake(sslContext);
+    
+    //拿到握手的结构，赋值给上次握手的结果
 	lastSSLHandshakeError = status;
 	
+    //如果没错
 	if (status == noErr)
 	{
 		LogVerbose(@"SSLHandshake complete");
 		
+        //把开始读写 TLS 从标记中移除
 		flags &= ~kStartingReadTLS;
 		flags &= ~kStartingWriteTLS;
 		
+        //把 socket 安全通道标记加上
 		flags |=  kSocketSecure;
 		
+        
+        //拿到代理
 		__strong id theDelegate = delegate;
 
 		if (delegateQueue && [theDelegate respondsToSelector:@selector(socketDidSecure:)])
 		{
 			dispatch_async(delegateQueue, ^{ @autoreleasepool {
-				
+				//调用 socket 已经开启安全通道的代理方法
 				[theDelegate socketDidSecure:self];
 			}});
 		}
 		
+        //停止读写
 		[self endCurrentRead];
 		[self endCurrentWrite];
 		
+        //开始下一次读写任务
 		[self maybeDequeueRead];
 		[self maybeDequeueWrite];
 	}
+    //如果认证错误
 	else if (status == errSSLPeerAuthCompleted)
 	{
 		LogVerbose(@"SSLHandshake peerAuthCompleted - awaiting delegate approval");
 		
 		__block SecTrustRef trust = NULL;
+        //从 sslContext 拿到证书相关细节
 		status = SSLCopyPeerTrust(sslContext, &trust);
 		if (status != noErr)
 		{
@@ -7519,11 +7619,13 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 			return;
 		}
 		
+        //拿到状态值
 		int aStateIndex = stateIndex;
 		dispatch_queue_t theSocketQueue = socketQueue;
 		
 		__weak GCDAsyncSocket *weakSelf = self;
 		
+        //创建一个完整的 block
 		void (^comletionHandler)(BOOL) = ^(BOOL shouldTrust){ @autoreleasepool {
 		#pragma clang diagnostic push
 		#pragma clang diagnostic warning "-Wimplicit-retain-self"
@@ -7551,9 +7653,11 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 		{
 			dispatch_async(delegateQueue, ^{ @autoreleasepool {
 			
+                //调用代理我们自己去 https 认证
 				[theDelegate socket:self didReceiveTrust:trust completionHandler:comletionHandler];
 			}});
 		}
+        //没实现代理直接报错关闭连接
 		else
 		{
 			if (trust) {
@@ -7568,6 +7672,8 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 			return;
 		}
 	}
+    
+    //握手错误为 IO阻塞的
 	else if (status == errSSLWouldBlock)
 	{
 		LogVerbose(@"SSLHandshake continues...");
@@ -7578,6 +7684,7 @@ static OSStatus SSLWriteFunction(SSLConnectionRef connection, const void *data, 
 	}
 	else
 	{
+        //其它错误直接关闭连接
 		[self closeWithError:[self sslError:status]];
 	}
 }
