@@ -5065,6 +5065,7 @@ enum GCDAsyncSocketConfig
 	}
 }
 
+//读取数据
 - (void)doReadData
 {
 	LogTrace();
@@ -5072,12 +5073,13 @@ enum GCDAsyncSocketConfig
 	// This method is called on the socketQueue.
 	// It might be called directly, or via the readSource when data is available to be read.
 	
+    //如果当前读取的包为空，或者 flag 为读取停止，这两种情况是不能去读取数据的
 	if ((currentRead == nil) || (flags & kReadsPaused))
 	{
 		LogVerbose(@"No currentRead or kReadsPaused");
 		
 		// Unable to read at this time
-		
+		//如果是安全的通讯，通过 TLS/SSL
 		if (flags & kSocketSecure)
 		{
 			// Here's the situation:
@@ -5094,9 +5096,11 @@ enum GCDAsyncSocketConfig
 			// So when a secure socket is closed, a "goodbye" packet comes across the wire.
 			// We want to make sure we read the "goodbye" packet so we can properly detect the TCP disconnection.
 			
+            //刷新 SSLBuffer， 把数据从链路上移到 prebuffer 中 （当前不读取数据的时候做）
 			[self flushSSLBuffers];
 		}
 		
+        //判断是否是CFStream的 TLS
 		if ([self usingCFStreamForTLS])
 		{
 			// CFReadStream only fires once when there is available data.
@@ -5109,7 +5113,7 @@ enum GCDAsyncSocketConfig
 			// 
 			// If the readSource is not firing,
 			// we want it to continue monitoring the socket.
-			
+			//挂起 source
 			if (socketFDBytesAvailable > 0)
 			{
 				[self suspendReadSource];
@@ -6010,14 +6014,16 @@ enum GCDAsyncSocketConfig
 	currentRead = nil;
 }
 
+//初始化读的超时
 - (void)setupReadTimerWithTimeout:(NSTimeInterval)timeout
 {
 	if (timeout >= 0.0)
 	{
+        //生成一个定时器 source
 		readTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, socketQueue);
 		
 		__weak GCDAsyncSocket *weakSelf = self;
-		
+		//句柄
 		dispatch_source_set_event_handler(readTimer, ^{ @autoreleasepool {
 		#pragma clang diagnostic push
 		#pragma clang diagnostic warning "-Wimplicit-retain-self"
@@ -6025,6 +6031,7 @@ enum GCDAsyncSocketConfig
 			__strong GCDAsyncSocket *strongSelf = weakSelf;
 			if (strongSelf == nil) return_from_block;
 			
+            //执行超时操作
 			[strongSelf doReadTimeout];
 			
 		#pragma clang diagnostic pop
@@ -6032,6 +6039,8 @@ enum GCDAsyncSocketConfig
 		
 		#if !OS_OBJECT_USE_OBJC
 		dispatch_source_t theReadTimer = readTimer;
+        
+        //取消的句柄
 		dispatch_source_set_cancel_handler(readTimer, ^{
 		#pragma clang diagnostic push
 		#pragma clang diagnostic warning "-Wimplicit-retain-self"
@@ -6042,14 +6051,16 @@ enum GCDAsyncSocketConfig
 		#pragma clang diagnostic pop
 		});
 		#endif
-		
+		//定时器延时， timeout 时间执行
 		dispatch_time_t tt = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC));
 		
+        //间隔为永远，即只执行一次
 		dispatch_source_set_timer(readTimer, tt, DISPATCH_TIME_FOREVER, 0);
 		dispatch_resume(readTimer);
 	}
 }
 
+//执行超时操作
 - (void)doReadTimeout
 {
 	// This is a little bit tricky.
@@ -6057,14 +6068,20 @@ enum GCDAsyncSocketConfig
 	// But if we do so synchronously we risk a possible deadlock.
 	// So instead we have to do so asynchronously, and callback to ourselves from within the delegate block.
 	
+    //因为这里用同步容易死锁，所以用异步从代理中回调
+    
+    //标记读暂停
 	flags |= kReadsPaused;
 	
 	__strong id theDelegate = delegate;
 
+    //判断是否实现了延迟，补时的代理
 	if (delegateQueue && [theDelegate respondsToSelector:@selector(socket:shouldTimeoutReadWithTag:elapsed:bytesDone:)])
 	{
+        //拿到当前读的包
 		GCDAsyncReadPacket *theRead = currentRead;
 		
+        //代理 queue 中的回调
 		dispatch_async(delegateQueue, ^{ @autoreleasepool {
 			
 			NSTimeInterval timeoutExtension = 0.0;
